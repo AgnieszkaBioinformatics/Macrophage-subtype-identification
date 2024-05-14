@@ -1,0 +1,158 @@
+---
+Author: Agnieszka Michalak
+Dataset source: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE136001
+Title: "sc-RNAseq of glioma-associated brain macrophages"
+Output: html_notebook
+---
+
+```{r}
+rm(list = ls())
+```
+
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(tidyverse)
+```
+
+
+```{r}
+## reading in the data
+
+base_dir <- "C:/Users/aurin/Downloads/GSE136001_RAW"
+samples <- c("GSM4039243_f-tumor-1", "GSM4039244_f-tumor-2", "GSM4039241_f-ctrl-1", "GSM4039242_f-ctrl-2", "GSM4039247_m-tumor-1", "GSM4039248_m-tumor-2", "GSM4039245_m-ctrl-1", "GSM4039246_m-ctrl-2")
+
+for (sample in samples) {
+  mtx_dir <- file.path(base_dir, paste0(sample, "-filtered-matrix.mtx"), 
+                       paste0(sample, "-filtered-matrix.mtx"))
+  features_dir <- file.path(base_dir, paste0(sample, "-filtered-features.tsv"), 
+                            paste0(sample, "-filtered-features.tsv"))
+  bar_dir <- file.path(base_dir, paste0(sample, "-filtered-barcodes.tsv"))
+  
+  data_mtx <- ReadMtx(mtx = mtx_dir, features = features_dir, cells = bar_dir)
+  
+  name <- strsplit(sample, "_")[[1]][2]
+  name <- gsub("-", "_", name)
+  assign(name, CreateSeuratObject(counts = data_mtx))
+}
+```
+
+
+## merging Seurat objects (it's not integration step yet) to check QC simultaneously
+
+```{r}
+merged <- merge(female_c1, y = c(female_c2, female_t1, female_t2, male_c1, male_c2, male_t1, male_t2),
+                add.cell.ids = c("female_c1", "female_c2", "female_t1", "female_t2", "male_c1",
+                                 "male_c2", "male_t1", "male_t2"))
+merged$sample <- rownames(merged@meta.data)
+merged@meta.data <- separate(merged@meta.data, col = "sample", into = c("sex", "type", "barcode"),
+                             sep = "_")
+```
+
+## QC
+
+```{r}
+merged$percent_mt <- PercentageFeatureSet(merged, pattern = "^mt-")
+merged$percent_mt
+VlnPlot(merged, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, pt.size = 0)
+
+```
+```{r}
+plot1 <- FeatureScatter(merged, feature1 = "nCount_RNA", feature2 = "percent_mt")
+plot1
+plot2 <- FeatureScatter(merged, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+```{r}
+plot2
+```
+```{r}
+filtered <- subset(merged, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent_mt < 5)
+```
+
+## Normalization
+
+```{r}
+normalized_log <- NormalizeData(filtered, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Feature selection
+
+```{r}
+glioma_log <- FindVariableFeatures(normalized_log, selection.method = "vst", nfeatures = 2000)
+top10_log <- head(VariableFeatures(glioma_log), 10)
+plot_log1 <- VariableFeaturePlot(glioma_log)
+plot_log2 <- LabelPoints(plot = plot_log1, points = top10_log, repel = TRUE)
+plot_log2
+```
+
+## Scaling
+
+```{r}
+all.genes_log <- rownames(glioma_log)
+glioma_log <- ScaleData(glioma_log, features = all.genes_log)
+```
+
+                                  ##### before batch correction ####
+## PCA
+
+```{r}
+glioma_log <- RunPCA(glioma_log, features = VariableFeatures(object = glioma_log))
+ElbowPlot(glioma_log)
+```
+```{r}
+## exploration of the primary sources of heterogeneity
+#jpeg("PCs_heatmaps.jpeg", width = 800, height = 1000, quality = 100, pointsize = 18)
+DimHeatmap(glioma_log, dims = 1:6, cells = 500, balanced = TRUE)
+#dev.off()
+```
+```{r}
+DimHeatmap(glioma_log, dims = 7:12, cells = 500, balanced = TRUE)
+```
+
+```{r}
+DimHeatmap(glioma_log, dims = 13:20, cells = 500, balanced = TRUE)
+```
+```{r}
+install.packages("jackstraw")
+library(jackstraw)
+
+js <- JackStraw(glioma_log, num.replicate = 100)
+js <- ScoreJackStraw(js, dims = 1:20)
+JackStrawPlot(js, dims = 1:20)
+```
+
+## KNN clustering
+
+```{r}
+knn <- FindNeighbors(glioma_log, dims = 1:20)
+knn <- FindClusters(knn, resolution = 0.5)
+```
+
+## UMAP 
+
+```{r}
+umap <- RunUMAP(knn, dims = 1:20)
+p1 <-DimPlot(umap, reduction = "umap", group.by = "sex")
+p2 <- DimPlot(umap, reduction = "umap", group.by = "type")
+p1+p2
+```
+```{r}
+tsne_knn <- RunTSNE(knn, dims = 1:20)
+DimPlot(object=tsne_knn, reduction = 'tsne')
+```
+```{r}
+BiocManager::install("scran")
+library(scran)
+set.seed(100)
+k_means <- clusterCells(glioma_log, use.dimred = "PCA", BLUSPARAM=KmeansParam(centers=10))
+```
+
+
+```{r}
+kmeans <- DoKMeans(object = glioma_log, dims = 1:20)
+k_means <- kmeans(glioma_log@reductions$pca@cell.embeddings, centers = 10, nstart = 100)
+DimPlot(k_means, reduction = "umap")
+```
+
